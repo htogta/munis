@@ -40,11 +40,15 @@ def render_bond_explorer():
     JOIN bonds_purposes bp ON b.purpose_id = bp.id
     LEFT JOIN bonds_issuers bi ON bi.bond_id = b.id
     LEFT JOIN issuers i ON bi.issuer_id = i.id
-    WHERE b.cusip = '{selected_cusip}'
+    WHERE b.cusip = :cusip
     LIMIT 1;
   """
 
-  bond_df = conn.query(bond_sql, ttl="5m")
+  bond_df = conn.query(
+    bond_sql,
+    params = {"cusip": selected_cusip},
+    ttl="5m"
+  )
 
   if bond_df.empty:
     st.warning("No metadata found for this bond.")
