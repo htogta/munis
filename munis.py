@@ -29,7 +29,7 @@ def render_bond_explorer():
   selected_cusip = selected_cusip.strip() # remove leading/trailing whitespace
 
   # getting bond metadata
-  bond_sql = f"""
+  bond_sql = """
     SELECT
       b.id AS bond_id,
       b.cusip, b.type, b.coupon_rate, b.issue_date, b.maturity_date,
@@ -56,7 +56,7 @@ def render_bond_explorer():
 
   bond = bond_df.iloc[0]
 
-  # display metadata
+  # display bond metadata
   st.subheader("Bond Summary")
   st.write(f"**CUSIP:** `{bond.cusip}`")
   st.write(f"**Issuer:** {bond.issuer_name} ({bond.issuer_state})")
@@ -68,7 +68,38 @@ def render_bond_explorer():
   st.write(f"**Duration:** {bond.duration}")
   st.write(f"**Tax Status:** {'Tax-Exempt' if bond.tax_status else 'Taxable'}")
 
-  # TODO funky visualizations
+  st.divider()
+
+  # trades
+  trades_sql = """
+    SELECT t.date, t.price, t.yield, t.quantity
+    FROM trades t
+    JOIN bonds_trades bt ON bt.trade_id = t.id
+    JOIN bonds b ON b.id = bt.bond_id
+    WHERE b.cusip = :cusip
+    ORDER BY t.date;
+  """
+  trades = conn.query(trades_sql, params = {"cusip": selected_cusip}, ttl = "5m")
+  
+  if trades.empty:
+    st.warning("No trades found for this bond")
+    return
+
+  # funky visualizations
+  st.subheader("Price over Time")
+  st.line_chart(trades.set_index("date")["price"])
+
+  st.subheader("Yield over Time")
+  st.line_chart(trades.set_index("date")["yield"])
+
+  st.divider()
+
+  # metrics
+  last_row = trades.iloc[-1]
+  col1, col2, col3 = st.columns(3)
+  col1.metric("Latest Price", f"${last_row['price']:.2f}")
+  col2.metric("Latest Yield", f"{last_row['yield']:.2f}%")
+  col3.metric("Last Trade Date", str(last_row['date']))
 
 with bonds_tab:
   render_bond_explorer()
