@@ -1,6 +1,12 @@
 import streamlit as st
+import pandas as pd
+import altair as alt
 
 conn = st.connection("postgresql", type = "sql")
+
+# main heading
+st.header("📊 M U N I S")
+# st.subheader("A dashboard for the municipal bond market")
 
 # our tabs
 market_tab, bonds_tab, risk_tab = st.tabs([
@@ -8,6 +14,129 @@ market_tab, bonds_tab, risk_tab = st.tabs([
   "Bond Explorer",
   "Ratings & Risk"
 ])
+
+# all the market overview code goes in here
+def render_market_overview():
+  st.header("📈 Market Overview")
+
+  states = conn.query(
+    "SELECT DISTINCT state FROM issuers ORDER BY state;", ttl = "10m"
+  )["state"].tolist()
+  types = conn.query(
+    "SELECT DISTINCT type FROM bonds ORDER BY type;", ttl = "10m"
+  )["type"].tolist()
+  purposes = conn.query(
+    "SELECT DISTINCT category FROM bonds_purposes ORDER BY category;", ttl = "10m"
+  )["category"].tolist()
+
+  col1, col2, col3 = st.columns(3)
+  selected_states = col1.multiselect("Filter by State", states)
+  selected_types = col1.multiselect("Filter by Bond Type", types)
+  selected_purposes = col1.multiselect("Filter by Purpose Category", purposes)
+
+  # building the WHERE clause
+  where = []
+  params = {}
+
+  if selected_states: 
+    where.append("i.state = ANY(:states)")
+    params["states"] = selected_states
+
+  if selected_types:
+    where.append("b.type = ANY(:types)")
+    params["types"] = selected_types
+
+  if selected_purposes:
+    where.append("bp.category = ANY(:purposes)")
+    params["purposes"] = selected_purposes
+
+  where_clause = "WHERE " + " AND ".join(where) if where else ""
+
+  # loading yield data
+  sql = f"""
+    SELECT
+      b.coupon_rate, b.duration, b.maturity_date, b.issue_date,
+      i.state, b.type, bp.category AS purpose
+    FROM bonds b
+    LEFT JOIN bonds_issuers bi ON bi.bond_id = b.id
+    LEFT JOIN issuers i ON bi.issuer_id = i.id
+    LEFT JOIN bonds_purposes bp ON bp.id = b.purpose_id
+    {where_clause}
+    ORDER BY maturity_date;
+  """
+
+  df = conn.query(sql, params = params or None, ttl = "2m")
+  if df.empty:
+    st.warning("No bonds match your filter selections")
+    return
+
+  # derived fields
+  df["maturity_date"] = pd.to_datetime(df["maturity_date"])
+  df["issue_date"] = pd.to_datetime(df["issue_date"]) # convert to datetime first
+  df["maturity_year"] = df["maturity_date"].dt.year
+  df["years_to_maturity"] = (df["maturity_date"] - df["issue_date"]).dt.days / 365.0
+
+  st.subheader("Aggregate Market Metrics")
+  colA, colB, colC = st.columns(3)
+  colA.metric("Avg Coupon", f"{df['coupon_rate'].mean():.2f}%")
+  colB.metric("Avg Duration", f"{df['duration'].mean():.2f} yrs")
+  colC.metric("Count", f"{len(df)} bonds")
+
+  st.divider()
+
+  # yield curve
+  st.subheader("Yield Curve (Approximate)")
+  
+  curve_df = (
+    df.groupby("maturity_year")["coupon_rate"]
+    .mean()
+    .reset_index()
+    .sort_values("maturity_year")
+  )
+  
+  st.line_chart(
+    curve_df.rename(columns={"maturity_year": "index"}).set_index("index")
+  )
+  st.caption("This shows average coupon/yield grouped by maturity year.")
+
+  st.divider()
+
+  # yield distribution
+  st.subheader("Distribution of Yields")
+  chart = (
+    alt.Chart(df)
+    .mark_bar()
+    .encode(
+      alt.X("coupon_rate:Q", bin=alt.Bin(maxbins=30), title="Yield (%)"),
+      alt.Y("count()", title="Number of Bonds"),
+      tooltip=[alt.Tooltip("count()", title="Count")]
+    )
+    .properties(height=300)
+  )
+  st.altair_chart(chart, use_container_width=True)
+  st.divider()
+
+  # yield vs duration
+  st.subheader("Yield vs Duration")
+  st.scatter_chart(df[["coupon_rate", "duration"]])
+  st.caption("Shows how yield relates to duration across the filtered dataset.")
+  st.divider()
+
+  # state comparison
+  if not selected_states:
+    st.subheader("Top States by Average Yield")
+    state_yield = (
+      df.groupby("state")["coupon_rate"]
+      .mean()
+      .sort_values(ascending=False)
+      .head(10)
+    )
+    st.bar_chart(state_yield)
+    st.caption("Shows which states tend to have higher yields.")
+
+# all the "ratings & risk" page code goes in here
+def render_ratings_risk():
+  pass
 
 # the bond explorer page's code all goes in here
 def render_bond_explorer():
@@ -103,3 +232,9 @@ def render_bond_explorer():
 
 with bonds_tab:
   render_bond_explorer()
+
+with risk_tab:
+  render_ratings_risk()
+
+with market_tab:
+  render_market_overview()
