@@ -136,7 +136,146 @@ def render_market_overview():
 
 # all the "ratings & risk" page code goes in here
 def render_ratings_risk():
-  pass
+  st.header("🚨 Ratings & Risk")
+
+  # loading filter values
+  state_list = conn.query(
+    "SELECT DISTINCT state FROM issuers ORDER BY state;", ttl="10m"
+  )["state"].tolist()
+  
+  agencies = conn.query(
+    "SELECT DISTINCT agency FROM credit_ratings ORDER BY agency;", ttl="10m"
+  )["agency"].tolist()
+  
+  outlooks = conn.query(
+    "SELECT DISTINCT outlook FROM credit_ratings ORDER BY outlook;", ttl="10m"
+  )["outlook"].tolist()
+
+  # filtering UI
+  c1, c2, c3 = st.columns(3)
+  selected_states = c1.multiselect("State", state_list)
+  selected_agencies = c2.multiselect("Rating Agency", agencies)
+  selected_outlooks = c3.multiselect("Outlook", outlooks)
+
+  # building WHERE clause
+  where = []
+  params = {}
+  
+  if selected_states:
+    where.append("i.state = ANY(:states)")
+    params["states"] = selected_states
+  
+  if selected_agencies:
+    where.append("cr.agency = ANY(:agencies)")
+    params["agencies"] = selected_agencies
+  
+  if selected_outlooks:
+    where.append("cr.outlook = ANY(:outlooks)")
+    params["outlooks"] = selected_outlooks
+
+  where_clause = "WHERE " + " AND ".join(where) if where else ""
+
+  # loading the joined rating data
+  sql = f"""
+    SELECT
+      b.cusip, b.coupon_rate, b.duration, b.type,
+      i.name AS issuer_name, i.state,
+      cr.agency, cr.date AS rating_date, cr.rating, cr.outlook
+    FROM credit_ratings cr
+    JOIN bonds_credit_ratings bcr ON bcr.credit_id = cr.id
+    JOIN bonds b ON b.id = bcr.bond_id
+    LEFT JOIN bonds_issuers bi ON bi.bond_id = b.id
+    LEFT JOIN issuers i ON i.id = bi.issuer_id
+    {where_clause}
+    ORDER BY cr.date DESC;
+  """
+  
+  df = conn.query(sql, params=params or None, ttl="2m")
+
+  if df.empty:
+    st.warning("No rating data available for the selected filters.")
+    return
+
+  # parsing date col directly
+  df["rating_date"] = pd.to_datetime(df["rating_date"])
+  
+  st.subheader("Summary Metrics")
+  cA, cB, cC = st.columns(3)
+  cA.metric("Total Rated Bonds", len(df))
+  cB.metric("Avg Coupon", f"{df['coupon_rate'].mean():.2f}%")
+  cC.metric("Unique Rating Grades", df["rating"].nunique())
+  st.divider()
+
+  # rating distribution
+  st.subheader("Distribution of Credit Ratings")
+  
+  chart = (
+    alt.Chart(df)
+    .mark_bar()
+    .encode(
+      x=alt.X("rating:N", sort="descending"),
+      y=alt.Y("count()", title="Number of Bonds"),
+      tooltip=["rating", "count()"],
+      color=alt.Color("rating:N", legend=None),
+    )
+    .properties(height=300)
+  )
+  st.altair_chart(chart, use_container_width=True)
+  st.divider()
+
+  # rating vs yield
+  st.subheader("Yield (Coupon) vs Credit Rating")
+  
+  scatter = (
+    alt.Chart(df)
+    .mark_circle(size=80)
+    .encode(
+      x=alt.X("rating:N", sort="descending"),
+      y=alt.Y("coupon_rate:Q", title="Coupon (%)"),
+      tooltip=["cusip", "rating", "coupon_rate"],
+      color=alt.Color("state:N", title="State"),
+    )
+    .interactive()
+    .properties(height=300)
+  )
+  
+  st.altair_chart(scatter, use_container_width=True)
+  st.divider()
+
+  # recent rating changes
+  st.subheader("Latest Rating Updates")
+  
+  recent_updates = (
+    df.sort_values("rating_date", ascending=False)
+    .groupby("cusip")
+    .head(1)  # latest rating per bond
+    .head(10) # show 10 newest
+    .sort_values("rating_date", ascending=False)
+  )
+  
+  st.table(
+    recent_updates[["rating_date", "cusip", "issuer_name", "rating", "outlook"]]
+  )
+  st.divider()
+
+  # highest-risk (lowest rated) bonds
+  st.subheader("Highest-Risk Bonds")
+  
+  # Sort ratings low to high
+  RATING_ORDER = [ # i think this is right?
+    "AAA", "AA+", "AA", "AA-", "A+", "A", "A-",
+    "BBB+", "BBB", "BBB-", "BB+", "BB", "BB-",
+    "B+", "B", "B-", "CCC+", "CCC", "CCC-", "CC",
+    "C", "D"
+  ]
+  
+  df["rating_sort"] = df["rating"].apply(
+    lambda r: RATING_ORDER.index(r) if r in RATING_ORDER else 999
+  )
+  risky = df.sort_values("rating_sort", ascending=False).head(10)
+  st.table(
+    risky[["rating", "outlook", "cusip", "issuer_name", "coupon_rate"]]
+  )
 
 # the bond explorer page's code all goes in here
 def render_bond_explorer():
