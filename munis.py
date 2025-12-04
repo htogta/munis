@@ -9,10 +9,11 @@ st.header("📊 M U N I S")
 # st.subheader("A dashboard for the municipal bond market")
 
 # our tabs
-market_tab, bonds_tab, risk_tab = st.tabs([
+market_tab, bonds_tab, risk_tab, state_compare_tab = st.tabs([
   "Market Overview",
   "Bond Explorer",
-  "Ratings & Risk"
+  "Ratings & Risk",
+  "State Compare"
 ])
 
 # all the market overview code goes in here
@@ -262,20 +263,25 @@ def render_ratings_risk():
   # rating vs yield
   st.subheader("Yield (Coupon) vs Credit Rating")
   
-  scatter = (
-    alt.Chart(df)
-    .mark_circle(size=80)
-    .encode(
-      x=alt.X("rating:N", sort="descending"),
-      y=alt.Y("coupon_rate:Q", title="Coupon (%)"),
-      tooltip=["cusip", "rating", "coupon_rate"],
-      color=alt.Color("state:N", title="State"),
-    )
-    .interactive()
-    .properties(height=300)
-  )
   
-  st.altair_chart(scatter, use_container_width=True)
+  line_chart = (
+      alt.Chart(df)
+      .mark_line(point=True)  # points on the line
+      .encode(
+          x=alt.X("rating:N", sort="descending"),
+          y=alt.Y("mean(coupon_rate):Q", title="Average Coupon (%)"),
+          color=alt.Color("state:N", title="State"),
+          tooltip=[
+              "state:N",
+              alt.Tooltip("mean(coupon_rate):Q", title="Avg Coupon (%)"),
+              "rating:N"
+          ],
+      )
+      .interactive()
+      .properties(height=300)
+  )
+
+  st.altair_chart(line_chart, use_container_width=True)
   st.divider()
 
   # avg yield by credit rating
@@ -426,6 +432,124 @@ def render_bond_explorer():
   col2.metric("Latest Yield", f"{last_row['yield']:.2f}%")
   col3.metric("Last Trade Date", str(last_row['date']))
 
+def render_state_compare():
+    st.header("State Compare")
+
+    # loading filter values
+    state_list = conn.query(
+        "SELECT DISTINCT state FROM issuers ORDER BY state;", ttl="10m"
+    )["state"].tolist()
+
+    c1, c2 = st.columns(2)
+    selected_state_1 = c1.selectbox("State A", state_list)
+    selected_state_2 = c2.selectbox("State B", state_list)
+
+    if selected_state_1 == selected_state_2:
+        st.warning("Select two different states")
+        return
+
+    # Combine selected states into a list
+    selected_states = [selected_state_1, selected_state_2]
+
+    # Build WHERE clause
+    where = ["i.state = ANY(:states)"]
+    params = {"states": selected_states}
+    where_clause = "WHERE " + " AND ".join(where)
+
+    # SQL query
+    sql = f"""
+        SELECT
+            b.cusip, b.coupon_rate, b.duration, b.type,
+            i.name AS issuer_name, i.state,
+            cr.agency, cr.date AS rating_date, cr.rating, cr.outlook
+        FROM credit_ratings cr
+        JOIN bonds_credit_ratings bcr ON bcr.credit_id = cr.id
+        JOIN bonds b ON b.id = bcr.bond_id
+        LEFT JOIN bonds_issuers bi ON bi.bond_id = b.id
+        LEFT JOIN issuers i ON i.id = bi.issuer_id
+        {where_clause}
+        ORDER BY cr.date DESC;
+    """
+
+    # Execute query
+    df = conn.query(sql, params=params, ttl="2m")
+
+    if df.empty:
+        st.warning("No rating data available for the selected states.")
+        return
+
+    # parse date
+    df["rating_date"] = pd.to_datetime(df["rating_date"])
+
+    # Summary metrics per state
+    st.subheader("Summary Metrics")
+    metrics = df.groupby("state").agg(
+        total_bonds=("cusip", "count"),
+        avg_coupon=("coupon_rate", "mean"),
+        unique_ratings=("rating", "nunique")
+    ).reset_index()
+
+    c1, c2, c3 = st.columns(3)
+    for i, state in enumerate(selected_states):
+        state_metrics = metrics[metrics["state"] == state].iloc[0]
+        if i == 0:
+            c1.metric(f"{state} - Total Bonds", state_metrics["total_bonds"])
+            c2.metric(f"{state} - Avg Coupon", f"{state_metrics['avg_coupon']:.2f}%")
+            c3.metric(f"{state} - Unique Ratings", state_metrics["unique_ratings"])
+        else:
+            c1.metric(f"{state} - Total Bonds", state_metrics["total_bonds"])
+            c2.metric(f"{state} - Avg Coupon", f"{state_metrics['avg_coupon']:.2f}%")
+            c3.metric(f"{state} - Unique Ratings", state_metrics["unique_ratings"])
+    st.divider()
+
+    # Rating distribution side by side
+    st.subheader("Distribution of Credit Ratings by State")
+    c1, c2 = st.columns(2)
+
+    for i, state in enumerate([selected_state_1, selected_state_2]):
+      state_df = df[df["state"] == state]
+
+      chart = (
+          alt.Chart(state_df)
+          .mark_bar()
+          .encode(
+              x=alt.X("rating:N", sort="descending", title="Rating"),
+              y=alt.Y("count()", title="Number of Bonds"),
+              color=alt.Color("rating:N", legend=None),
+              tooltip=["rating:N", "count()"]
+          )
+          .properties(height=300, width=350)
+      )
+
+      if i == 0:
+          c1.subheader(state)  # Use subheader inside the column
+          c1.altair_chart(chart, use_container_width=True)
+      else:
+          c2.subheader(state)  # Use subheader inside the column
+          c2.altair_chart(chart, use_container_width=True)
+
+    st.divider()
+
+    # Yield vs rating per state
+    st.subheader("Yield (Coupon) vs Credit Rating")
+    line_chart = (
+        alt.Chart(df)
+        .mark_line(point=True)
+        .encode(
+            x=alt.X("rating:N", sort="descending"),
+            y=alt.Y("mean(coupon_rate):Q", title="Average Coupon (%)"),
+            color=alt.Color("state:N", title="State"),
+            tooltip=[
+                "state:N",
+                alt.Tooltip("mean(coupon_rate):Q", title="Avg Coupon (%)"),
+                "rating:N"
+            ],
+        )
+        .interactive()
+        .properties(height=300)
+    )
+    st.altair_chart(line_chart, use_container_width=True)
+
 with bonds_tab:
   render_bond_explorer()
 
@@ -434,3 +558,6 @@ with risk_tab:
 
 with market_tab:
   render_market_overview()
+
+with state_compare_tab:
+  render_state_compare()
