@@ -55,12 +55,21 @@ def render_market_overview():
   # loading yield data
   sql = f"""
     SELECT
-      b.coupon_rate, b.duration, b.maturity_date, b.issue_date,
-      i.state, b.type, bp.category AS purpose
+      b.coupon_rate, b.duration, b.maturity_date, b.issue_date, b.cusip,
+      i.state, b.type, bp.category AS purpose,
+      t.price, t.yield
     FROM bonds b
     LEFT JOIN bonds_issuers bi ON bi.bond_id = b.id
     LEFT JOIN issuers i ON bi.issuer_id = i.id
     LEFT JOIN bonds_purposes bp ON bp.id = b.purpose_id
+    LEFT JOIN LATERAL (
+      SELECT tr.price, tr.yield
+      FROM trades tr
+      JOIN bonds_trades bt ON bt.trade_id = tr.id
+      WHERE bt.bond_id = b.id
+      ORDER BY tr.date DESC
+      LIMIT 1
+    ) t ON TRUE
     {where_clause}
     ORDER BY maturity_date;
   """
@@ -116,10 +125,37 @@ def render_market_overview():
   st.altair_chart(chart, use_container_width=True)
   st.divider()
 
-  # yield vs duration
-  st.subheader("Yield vs Duration")
-  st.scatter_chart(df[["coupon_rate", "duration"]])
-  st.caption("Shows how yield relates to duration across the filtered dataset.")
+  # bond price vs yield
+  st.subheader("Bond Price vs Yield")
+
+  df_scatter = df.dropna(subset=["price", "yield"])
+
+  # ensure price and yield exist (must join trades table)
+  if "price" in df.columns and "yield" in df.columns:
+    chart = (
+      alt.Chart(df_scatter)
+      .mark_line(point=True)
+      .encode(
+        x=alt.X("price:Q", title="Price ($)"),
+        y=alt.Y("mean(yield):Q", title="Average Yield (%)"),
+        color=alt.Color("state:N", title="State"),
+        # color=alt.Color("maturity_bucket:N"),
+        tooltip=[
+          alt.Tooltip("cusip:N", title="CUSIP"),
+          alt.Tooltip("yield:Q", format=".2f"),
+          alt.Tooltip("price:Q", format=".2f"),
+          "state:N",
+          "type:N",
+          "purpose:N",
+        ]
+      )
+      .interactive()
+      .properties(height=350)
+    )
+    st.altair_chart(chart, use_container_width=True)
+    st.caption("Higher yields typically correspond to lower prices — showing the inverse price/yield relationship.")
+  else:
+    st.info("Trade price & yield data unavailable at this level — view details in Bond Explorer.")
   st.divider()
 
   # state comparison
@@ -240,6 +276,27 @@ def render_ratings_risk():
   )
   
   st.altair_chart(scatter, use_container_width=True)
+  st.divider()
+
+  # avg yield by credit rating
+  st.subheader("Average Yield by Credit Rating")
+  
+  bar = (
+      alt.Chart(df)
+      .mark_bar()
+      .encode(
+          x=alt.X("rating:N", sort="descending", title="Credit Rating"),
+          y=alt.Y("mean(coupon_rate):Q", title="Avg Coupon (%)"),
+          tooltip=[
+              alt.Tooltip("rating:N", title="Rating"),
+              alt.Tooltip("mean(coupon_rate):Q", title="Avg Coupon", format=".2f")
+          ],
+          color=alt.Color("rating:N", legend=None)
+      )
+      .properties(height=300)
+  )
+  
+  st.altair_chart(bar, use_container_width=True)
   st.divider()
 
   # recent rating changes
